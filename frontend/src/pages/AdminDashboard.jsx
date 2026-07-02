@@ -1,5 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import ProfileSettings from '../components/ProfileSettings';
+import { getMentorLevel, getMentorLevelStyle } from '../utils/mentorLevel';
+import { useAuth } from '../context/AuthContext';
 import {
   addTestimonial,
   addUser,
@@ -10,12 +12,14 @@ import {
   getNotifications,
   getUsersByRole,
   getDB,
-  logout,
+  logout as dbLogout,
   markNotificationRead,
   rejectMentor,
-  updateUserProfile,
 } from '../utils/db';
+import { tokenManager } from '../utils/tokenManager';
+import Input from '../components/common/Input';
 import { getPublishedSiteContent, savePublishedSiteContent } from '../content/siteContent';
+import { adminService } from '../services/adminService';
 
 const monthLabels = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -35,6 +39,10 @@ const useTheme = () => {
   return { theme, toggleTheme };
 };
 
+const Skeleton = ({ className = '' }) => (
+  <div className={`animate-pulse rounded bg-surface-variant/50 ${className}`} />
+);
+
 const emptyMemberForm = {
   role: 'mentee',
   name: '',
@@ -49,10 +57,10 @@ const emptyMemberForm = {
 };
 
 const AdminDashboard = ({ navigateTo }) => {
+  const { logout } = useAuth();
   const { theme, toggleTheme } = useTheme();
   const [user, setUser] = useState(getCurrentUser());
   const [activeView, setActiveView] = useState('dashboard');
-  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [mentors, setMentors] = useState([]);
   const [mentees, setMentees] = useState([]);
   const [bookings, setBookings] = useState([]);
@@ -71,11 +79,10 @@ const AdminDashboard = ({ navigateTo }) => {
   const [analyticsYear, setAnalyticsYear] = useState(String(new Date().getFullYear()));
   const [analyticsMonth, setAnalyticsMonth] = useState(String(new Date().getMonth() + 1).padStart(2, '0'));
   const [analyticsCustomRange, setAnalyticsCustomRange] = useState({ from: `${new Date().getFullYear()}-01-01`, to: `${new Date().getFullYear()}-12-31` });
-  const [profileForm, setProfileForm] = useState({ name: '', email: '', avatar: '', password: '', newPassword: '', confirmPassword: '' });
-  const [profileStatus, setProfileStatus] = useState('');
   const [testimonialForm, setTestimonialForm] = useState({ name: '', role: '', company: '', quote: '', avatar: '' });
   const [testimonialSuccess, setTestimonialSuccess] = useState('');
   const [contentStatus, setContentStatus] = useState('');
+  const [loading, setLoading] = useState(true);
 
   const [contentEditor, setContentEditor] = useState({
     terms: { heroTitle: '', heroSummary: '', updatedAt: '', overview: '', sectionsJson: '' },
@@ -84,31 +91,38 @@ const AdminDashboard = ({ navigateTo }) => {
     resources: { heroTitle: '', heroSummary: '', eyebrow: '', blogPostsJson: '', resumeTemplatesJson: '' },
   });
 
-  const refreshData = () => {
-    const db = getDB();
-    setMentors(getUsersByRole('mentor'));
-    setMentees(getUsersByRole('mentee'));
-    setBookings(db.bookings || []);
-    setNotifications(getNotifications());
-    setUser(getCurrentUser());
+  const refreshData = async () => {
+    setLoading(true);
+    // try {
+    //   // Try fetching from backend API first
+    //   const response = await adminService.getUsers();
+    //   const allUsers = response.users || [];
+    //   setMentors(allUsers.filter(u => u.role === 'mentor'));
+    //   setMentees(allUsers.filter(u => u.role === 'mentee'));
+    //   setNotifications(getNotifications());
+    //   setUser(getCurrentUser());
+    //   const db = getDB();
+    //   setBookings(db.bookings || []);
+    // } catch (error) {
+      // console.warn('Backend API unavailable, falling back to local data:', error.message);
+      try {
+        const db = getDB();
+        setMentors(getUsersByRole('mentor'));
+        setMentees(getUsersByRole('mentee'));
+        setBookings(db.bookings || []);
+        setNotifications(getNotifications());
+        setUser(getCurrentUser());
+      } catch (err) {
+        // console.error('Failed to refresh data:', err);
+      
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => {
     refreshData();
   }, []);
-
-  useEffect(() => {
-    if (user) {
-      setProfileForm({
-        name: user.name || '',
-        email: user.email || '',
-        avatar: user.avatar || '',
-        password: '',
-        newPassword: '',
-        confirmPassword: '',
-      });
-    }
-  }, [user]);
 
   useEffect(() => {
     setContentEditor({
@@ -258,13 +272,21 @@ const AdminDashboard = ({ navigateTo }) => {
   }, [bookings, revenueDateRange, revenueMonth, revenueRange, revenueYear]);
 
   const handleLogout = () => {
+    dbLogout();
+    tokenManager.clearTokens();
     logout();
     navigateTo('home');
   };
 
-  const submitReject = (event) => {
+  const submitReject = async (event) => {
     event.preventDefault();
-    rejectMentor(showRejectModal, rejectReason);
+    try {
+      await adminService.rejectMentor(showRejectModal);
+    } catch (err) {
+      console.warn('Backend reject failed, falling back to local:', err.message);
+      rejectMentor(showRejectModal, rejectReason);
+    }
+    if (user?.id === showRejectModal) setUser({ ...user, status: 'rejected', rejectionReason: rejectReason });
     setShowRejectModal(null);
     setRejectReason('');
     refreshData();
@@ -309,7 +331,7 @@ const AdminDashboard = ({ navigateTo }) => {
         <button onClick={onDownload} className="rounded-full bg-secondary px-4 py-2 text-sm font-bold text-on-secondary">Download CSV</button>
       </div>
       <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-        {(mode === 'year' || mode === 'month') && <input type="number" min="2001" value={year} onChange={(event) => setYear(event.target.value)} className="rounded-lg border border-outline-variant/30 bg-surface p-3" placeholder="Year above 2000" />}
+        {(mode === 'year' || mode === 'month') && <input type="text" inputMode="numeric" min="2001" value={year} onChange={(event) => setYear(event.target.value)} className="rounded-lg border border-outline-variant/30 bg-surface p-3" placeholder="Year above 2000" autoComplete="off" />}
         {mode === 'month' && (
           <select value={month} onChange={(event) => setMonth(event.target.value)} className="rounded-lg border border-outline-variant/30 bg-surface p-3">
             {monthLabels.map((label, index) => <option key={label} value={String(index + 1).padStart(2, '0')}>{label}</option>)}
@@ -326,27 +348,6 @@ const AdminDashboard = ({ navigateTo }) => {
     </div>
   );
 
-  const handleProfileSave = (event) => {
-    event.preventDefault();
-    if (profileForm.newPassword && profileForm.newPassword !== profileForm.confirmPassword) {
-      setProfileStatus('New passwords do not match.');
-      return;
-    }
-    if (profileForm.newPassword && profileForm.password !== user.password) {
-      setProfileStatus('Current password is incorrect.');
-      return;
-    }
-    updateUserProfile(user.id, {
-      name: profileForm.name,
-      email: profileForm.email,
-      avatar: profileForm.avatar,
-      ...(profileForm.newPassword ? { password: profileForm.newPassword } : {}),
-    });
-    setProfileStatus('Profile updated successfully.');
-    refreshData();
-    setTimeout(() => setProfileStatus(''), 3000);
-  };
-
   const handleTestimonialSubmit = (event) => {
     event.preventDefault();
     addTestimonial({ ...testimonialForm, published: true });
@@ -359,7 +360,7 @@ const AdminDashboard = ({ navigateTo }) => {
     try {
       return JSON.parse(value);
     } catch {
-      return fallback;
+      // return fallback;
     }
   };
 
@@ -376,12 +377,19 @@ const AdminDashboard = ({ navigateTo }) => {
     setTimeout(() => setContentStatus(''), 3000);
   };
 
+  if (!user) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-surface">
+        <p className="text-on-surface-variant">Please log in to access the admin dashboard.</p>
+      </div>
+    );
+  }
+
   const navItems = [
     { id: 'dashboard', icon: 'dashboard', label: 'Dashboard' },
     { id: 'mentors', icon: 'groups', label: 'Mentors' },
     { id: 'mentees', icon: 'person', label: 'Mentees' },
     { id: 'applications', icon: 'assignment', label: 'Applications' },
-    { id: 'content', icon: 'library_books', label: 'Content' },
     { id: 'earnings', icon: 'payments', label: 'Earnings' },
     { id: 'settings', icon: 'settings', label: 'Settings' },
   ];
@@ -399,14 +407,14 @@ const AdminDashboard = ({ navigateTo }) => {
     return (
       <div className="relative h-72 w-full">
         <svg className="h-full w-full overflow-visible" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none">
-          {[50, 100, 150].map((line) => <line key={line} x1="0" x2={width} y1={line} y2={line} stroke="#45483f" strokeOpacity="0.1" />)}
+          {[50, 100, 150].map((line) => <line key={line} x1="0" x2={width} y1={line} y2={line} style={{ stroke: 'var(--color-on-surface-variant)', strokeOpacity: '0.1' }} />)}
           {mode === 'stacked' ? (
             <>
-              <path d={mentorPath} fill="none" stroke="#202a10" strokeLinecap="round" strokeLinejoin="round" strokeWidth="4" />
-              <path d={menteePath} fill="none" stroke="#5b6239" strokeLinecap="round" strokeLinejoin="round" strokeWidth="4" strokeDasharray="8 8" />
+              <path d={mentorPath} fill="none" style={{ stroke: 'var(--color-primary)' }} strokeLinecap="round" strokeLinejoin="round" strokeWidth="4" />
+              <path d={menteePath} fill="none" style={{ stroke: 'var(--color-secondary)' }} strokeLinecap="round" strokeLinejoin="round" strokeWidth="4" strokeDasharray="8 8" />
             </>
           ) : (
-            <path d={valuePath} fill="none" stroke="#202a10" strokeLinecap="round" strokeLinejoin="round" strokeWidth="4" />
+            <path d={valuePath} fill="none" style={{ stroke: 'var(--color-primary)' }} strokeLinecap="round" strokeLinejoin="round" strokeWidth="4" />
           )}
         </svg>
         <div className="mt-2 grid text-xs font-semibold text-on-surface-variant" style={{ gridTemplateColumns: `repeat(${Math.min(data.length, 12)}, minmax(0, 1fr))` }}>
@@ -416,21 +424,19 @@ const AdminDashboard = ({ navigateTo }) => {
     );
   };
 
-  const renderSidebar = ({ mobile = false } = {}) => (
-    <aside className={`flex h-full w-64 shrink-0 flex-col bg-primary py-6 text-primary-fixed-dim shadow-xl ${
-      mobile ? '' : 'hidden lg:fixed lg:inset-y-0 lg:left-0 lg:z-40 lg:flex'
-    }`}>
-      <button className="mb-8 px-6 text-left" onClick={() => { setActiveView('dashboard'); if (mobile) setMobileMenuOpen(false); }}>
+  const renderSidebar = () => (
+    <aside className="flex h-full w-64 shrink-0 flex-col bg-primary py-6 text-on-primary shadow-xl hidden lg:fixed lg:inset-y-0 lg:left-0 lg:z-40 lg:flex">
+      <button className="mb-8 px-6 text-left" onClick={() => setActiveView('dashboard')}>
         <h1 className="font-headline-md text-2xl font-bold text-on-primary">ProLign</h1>
-        <p className="text-sm font-semibold text-primary-fixed-dim">Modern Mentorship Admin</p>
+        <p className="text-sm font-semibold text-on-primary/80">Modern Mentorship Admin</p>
       </button>
       <nav className="flex-1 space-y-2 overflow-y-auto px-2">
         {navItems.map((item) => (
           <button
             key={item.id}
-            onClick={() => { setActiveView(item.id); if (mobile) setMobileMenuOpen(false); }}
+            onClick={() => setActiveView(item.id)}
             className={`group flex w-full items-center rounded-lg px-4 py-3 text-left text-sm font-semibold transition-all ${
-              activeView === item.id ? 'scale-[0.98] bg-secondary-container text-on-secondary-container' : 'text-primary-fixed-dim hover:bg-primary-fixed-variant/20 hover:text-on-primary'
+              activeView === item.id ? 'scale-[0.98] bg-secondary-container text-on-secondary-container' : 'hover:bg-primary-fixed-variant/20 hover:text-on-primary'
             }`}
           >
             <span className="material-symbols-outlined mr-3 transition-transform group-hover:scale-110">{item.icon}</span>
@@ -439,11 +445,11 @@ const AdminDashboard = ({ navigateTo }) => {
         ))}
       </nav>
       <div className="mx-2 border-t border-on-primary/10 pt-4 space-y-1">
-        <button onClick={toggleTheme} className="flex w-full items-center rounded-lg px-4 py-3 text-left text-sm font-semibold text-primary-fixed-dim transition-colors hover:bg-primary-fixed-variant/20 hover:text-on-primary">
+        <button onClick={toggleTheme} className="flex w-full items-center rounded-lg px-4 py-3 text-left text-sm font-semibold text-on-primary transition-colors hover:bg-primary-fixed-variant/20">
           <span className="material-symbols-outlined mr-3">{theme === 'light' ? 'dark_mode' : 'light_mode'}</span>
           {theme === 'light' ? 'Dark Mode' : 'Light Mode'}
         </button>
-        <button onClick={handleLogout} className="flex w-full items-center rounded-lg px-4 py-3 text-left text-sm font-semibold text-primary-fixed-dim transition-colors hover:bg-error/10 hover:text-error">
+        <button onClick={handleLogout} className="flex w-full items-center rounded-lg px-4 py-3 text-left text-sm font-semibold text-on-primary transition-colors hover:bg-error/10 hover:text-error">
           <span className="material-symbols-outlined mr-3">logout</span>
           Logout
         </button>
@@ -454,20 +460,30 @@ const AdminDashboard = ({ navigateTo }) => {
   const renderDashboard = () => (
     <section className="space-y-8">
       <div className="grid grid-cols-1 gap-6 md:grid-cols-2 xl:grid-cols-4">
-        {[
-          ['school', 'Active Mentors', activeMentors.length],
-          ['diversity_3', 'Total Mentees', mentees.length],
-          ['assignment', 'Pending Mentors', pendingMentors.length],
-          ['person_add', 'User Signups', allMembers.length],
-        ].map(([icon, label, value]) => (
-          <div key={label} className="rounded-xl border border-outline-variant/10 bg-surface-container-high p-6 natural-shadow">
-            <span className="material-symbols-outlined mb-4 rounded-lg bg-primary-fixed p-2 text-on-primary-fixed">{icon}</span>
-            <h3 className="text-sm font-semibold uppercase tracking-wider text-on-surface-variant">{label}</h3>
-            <p className="mt-1 font-headline-md text-3xl font-bold text-on-surface">{Number(value).toLocaleString()}</p>
-          </div>
-        ))}
+        {loading
+          ? Array.from({ length: 4 }).map((_, i) => (
+              <div key={i} className="rounded-2xl border border-outline-variant/15 bg-surface-container-lowest p-5">
+                <Skeleton className="mb-3 h-11 w-11" />
+                <Skeleton className="mb-2 h-7 w-24" />
+                <Skeleton className="h-4 w-32" />
+              </div>
+            ))
+          : [
+              ['school', 'Active Mentors', activeMentors.length],
+              ['diversity_3', 'Total Mentees', mentees.length],
+              ['assignment', 'Pending Mentors', pendingMentors.length],
+              ['person_add', 'User Signups', allMembers.length],
+            ].map(([icon, label, value]) => (
+              <div key={label} className="rounded-2xl border border-outline-variant/15 bg-surface-container-lowest p-5 transition-all hover:shadow-lg hover:scale-[1.01]">
+                <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-primary/10 mb-3">
+                  <span className="material-symbols-outlined text-[22px] text-primary">{icon}</span>
+                </span>
+                <p className="text-2xl font-bold text-on-surface">{Number(value).toLocaleString()}</p>
+                <p className="mt-1 text-xs font-semibold text-on-surface-variant">{label}</p>
+              </div>
+            ))}
       </div>
-      <div className="rounded-xl border border-outline-variant/20 bg-surface-container-low p-8 natural-shadow">
+      <div className="rounded-2xl border border-outline-variant/15 bg-surface-container-lowest p-6">
         <div className="mb-6 flex flex-col justify-between gap-3 md:flex-row md:items-center">
           <div>
             <h3 className="font-headline-md text-2xl font-bold text-on-surface">Past Registration Analytics</h3>
@@ -492,7 +508,7 @@ const AdminDashboard = ({ navigateTo }) => {
             () => downloadCsv('registration-analytics', [['Label', 'Mentors', 'Mentees'], ...registrationsByMonth.map((item) => [item.label, item.mentors, item.mentees])])
           )}
         </div>
-        {renderLineChart(registrationsByMonth, 'stacked')}
+        {loading ? <Skeleton className="h-72 w-full" /> : renderLineChart(registrationsByMonth, 'stacked')}
       </div>
     </section>
   );
@@ -500,7 +516,7 @@ const AdminDashboard = ({ navigateTo }) => {
   const renderMemberList = (role) => {
     const members = role === 'mentor' ? mentors : mentees;
     return (
-      <section className="rounded-xl border border-outline-variant/10 bg-surface-container p-8 natural-shadow">
+      <section className="rounded-2xl border border-outline-variant/15 bg-surface-container-lowest p-6">
         <div className="mb-6 flex flex-col justify-between gap-4 md:flex-row md:items-center">
           <div>
             <h3 className="font-headline-md text-2xl font-bold text-on-surface">{role === 'mentor' ? 'Mentors' : 'Mentees'}</h3>
@@ -514,17 +530,43 @@ const AdminDashboard = ({ navigateTo }) => {
         <div className="overflow-x-auto">
           <table className="w-full text-left">
             <thead>
-              <tr className="border-b border-on-surface/10 text-xs font-semibold uppercase tracking-wider text-on-surface-variant">
-                <th className="pb-4">Name</th>
-                <th className="pb-4">Profile</th>
-                <th className="pb-4">Joined</th>
-                <th className="pb-4 text-right">Actions</th>
+              <tr className="bg-surface-container-low border-b border-outline-variant/10 text-[11px] font-bold uppercase tracking-wider text-on-surface-variant">
+                <th className="px-6 py-3">Name</th>
+                <th className="px-6 py-3">Profile</th>
+                <th className="px-6 py-3">Joined</th>
+                <th className="px-6 py-3 text-right">Actions</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-on-surface/5">
+            {loading ? (
+            <tbody>
+              {Array.from({ length: 5 }).map((_, i) => (
+                <tr key={i} className="border-b border-outline-variant/10">
+                  <td className="px-6 py-4">
+                    <div className="flex items-center gap-3">
+                      <Skeleton className="h-10 w-10 rounded-full" />
+                      <div className="space-y-1">
+                        <Skeleton className="h-4 w-32" />
+                        <Skeleton className="h-3 w-24" />
+                      </div>
+                    </div>
+                  </td>
+                  <td className="px-6 py-4"><Skeleton className="h-4 w-24" /></td>
+                  <td className="px-6 py-4"><Skeleton className="h-4 w-20" /></td>
+                  <td className="px-6 py-4"><div className="flex justify-end"><Skeleton className="h-8 w-16" /></div></td>
+                </tr>
+              ))}
+            </tbody>
+          ) : members.length === 0 ? (
+            <tbody>
+              <tr>
+                <td colSpan={4} className="px-6 py-12 text-center text-sm text-on-surface-variant">No users found.</td>
+              </tr>
+            </tbody>
+          ) : (
+          <tbody className="divide-y divide-outline-variant/10">
               {members.map((member) => (
-                <tr key={member.id} className="transition-colors hover:bg-surface-container-low">
-                  <td className="py-4">
+                <tr key={member.id} className="transition-colors hover:bg-surface-container-low/50">
+                  <td className="px-6 py-4">
                     <div className="flex items-center gap-3">
                       <img className="h-10 w-10 rounded-full object-cover" src={member.avatar} alt={member.name} />
                       <div>
@@ -533,9 +575,9 @@ const AdminDashboard = ({ navigateTo }) => {
                       </div>
                     </div>
                   </td>
-                  <td className="py-4 text-sm text-on-surface-variant">{member.title || member.industry || 'Profile pending'}</td>
-                  <td className="py-4 text-sm text-on-surface-variant">{new Date(member.createdAt).toLocaleDateString()}</td>
-                  <td className="py-4">
+                  <td className="px-6 py-4 text-sm text-on-surface-variant">{member.title || member.industry || 'Profile pending'}</td>
+                  <td className="px-6 py-4 text-sm text-on-surface-variant">{new Date(member.createdAt).toLocaleDateString()}</td>
+                  <td className="px-6 py-4">
                     <div className="flex justify-end gap-2">
                       <button onClick={() => setSelectedMember(member)} className="rounded-lg p-2 text-secondary transition-colors hover:bg-secondary-container" title="View details">
                         <span className="material-symbols-outlined">visibility</span>
@@ -548,6 +590,7 @@ const AdminDashboard = ({ navigateTo }) => {
                 </tr>
               ))}
             </tbody>
+          )}
           </table>
         </div>
       </section>
@@ -555,9 +598,28 @@ const AdminDashboard = ({ navigateTo }) => {
   };
 
   const renderApplications = () => (
-    <section className="rounded-xl border border-outline-variant/10 bg-surface-container p-8 natural-shadow">
+    <section className="rounded-2xl border border-outline-variant/15 bg-surface-container-lowest p-6">
       <h3 className="mb-6 font-headline-md text-2xl font-bold text-on-surface">All Pending Approvals</h3>
-      {pendingMentors.length === 0 ? (
+      {loading ? (
+        <div className="space-y-4">
+          {Array.from({ length: 3 }).map((_, i) => (
+            <div key={i} className="flex flex-col justify-between gap-4 rounded-xl bg-surface-container-low p-4 md:flex-row md:items-center">
+              <div className="flex items-center gap-3">
+                <Skeleton className="h-12 w-12 rounded-full" />
+                <div className="space-y-1">
+                  <Skeleton className="h-5 w-40" />
+                  <Skeleton className="h-4 w-56" />
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <Skeleton className="h-9 w-20 rounded-lg" />
+                <Skeleton className="h-9 w-20 rounded-lg" />
+                <Skeleton className="h-9 w-20 rounded-lg" />
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : pendingMentors.length === 0 ? (
         <p className="text-sm text-on-surface-variant">No pending applications at this time.</p>
       ) : (
         <div className="space-y-4">
@@ -573,7 +635,7 @@ const AdminDashboard = ({ navigateTo }) => {
               <div className="flex gap-2">
                 <button onClick={() => setSelectedMember(mentor)} className="rounded-lg bg-surface px-4 py-2 text-sm font-bold text-on-surface-variant">Preview</button>
                 <button onClick={() => setShowRejectModal(mentor.id)} className="rounded-lg bg-error-container px-4 py-2 text-sm font-bold text-on-error-container">Reject</button>
-                <button onClick={() => { approveMentor(mentor.id); refreshData(); }} className="rounded-lg bg-secondary px-4 py-2 text-sm font-bold text-on-secondary">Approve</button>
+                <button onClick={async () => { try { await adminService.approveMentor(mentor.id); } catch(err) { console.warn('Backend approve failed, falling back:', err.message); approveMentor(mentor.id); } if (user?.id === mentor.id) setUser({ ...user, status: 'approved' }); refreshData(); }} className="rounded-lg bg-secondary px-4 py-2 text-sm font-bold text-on-secondary">Approve</button>
               </div>
             </div>
           ))}
@@ -585,21 +647,39 @@ const AdminDashboard = ({ navigateTo }) => {
   const renderEarnings = () => (
     <section className="space-y-8">
       <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
-        <div className="rounded-xl bg-primary p-6 text-on-primary natural-shadow">
-          <span className="material-symbols-outlined mb-4 text-primary-fixed">payments</span>
-          <p className="text-sm font-semibold text-primary-fixed-dim">Total Platform Revenue</p>
-          <p className="font-headline-md text-4xl font-bold">${totalRevenue.toLocaleString()}</p>
+        {loading ? (
+          Array.from({ length: 3 }).map((_, i) => (
+            <div key={i} className="rounded-2xl border border-outline-variant/15 bg-surface-container-lowest p-5">
+              <Skeleton className="mb-3 h-11 w-11 rounded-xl" />
+              <Skeleton className="mb-2 h-7 w-32" />
+              <Skeleton className="h-4 w-28" />
+            </div>
+          ))
+        ) : (<>
+        <div className="rounded-2xl bg-primary p-5 text-on-primary transition-all hover:shadow-lg hover:scale-[1.01]">
+          <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-on-primary/10 mb-3">
+            <span className="material-symbols-outlined text-[22px] text-on-primary">payments</span>
+          </span>
+          <p className="text-2xl font-bold">${totalRevenue.toLocaleString()}</p>
+          <p className="mt-1 text-xs font-semibold text-primary-fixed-dim">Total Platform Revenue</p>
         </div>
-        <div className="rounded-xl border border-outline-variant/10 bg-surface-container-high p-6 natural-shadow">
-          <p className="text-sm font-semibold text-on-surface-variant">Paid Bookings</p>
-          <p className="font-headline-md text-4xl font-bold text-on-surface">{bookings.filter((booking) => booking.paymentStatus === 'paid').length}</p>
+        <div className="rounded-2xl border border-outline-variant/15 bg-surface-container-lowest p-5 transition-all hover:shadow-lg hover:scale-[1.01]">
+          <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-primary/10 mb-3">
+            <span className="material-symbols-outlined text-[22px] text-primary">check_circle</span>
+          </span>
+          <p className="text-2xl font-bold text-on-surface">{bookings.filter((booking) => booking.paymentStatus === 'paid').length}</p>
+          <p className="mt-1 text-xs font-semibold text-on-surface-variant">Paid Bookings</p>
         </div>
-        <div className="rounded-xl border border-outline-variant/10 bg-surface-container-high p-6 natural-shadow">
-          <p className="text-sm font-semibold text-on-surface-variant">Average Transaction</p>
-          <p className="font-headline-md text-4xl font-bold text-on-surface">${Math.round(totalRevenue / Math.max(1, bookings.length)).toLocaleString()}</p>
+        <div className="rounded-2xl border border-outline-variant/15 bg-surface-container-lowest p-5 transition-all hover:shadow-lg hover:scale-[1.01]">
+          <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-secondary/10 mb-3">
+            <span className="material-symbols-outlined text-[22px] text-secondary">receipt_long</span>
+          </span>
+          <p className="text-2xl font-bold text-on-surface">${Math.round(totalRevenue / Math.max(1, bookings.length)).toLocaleString()}</p>
+          <p className="mt-1 text-xs font-semibold text-on-surface-variant">Average Transaction</p>
         </div>
+        </>)}
       </div>
-      <div className="rounded-xl border border-outline-variant/20 bg-surface-container-low p-8 natural-shadow">
+      <div className="rounded-2xl border border-outline-variant/15 bg-surface-container-lowest p-6">
         <div className="mb-6 flex flex-col justify-between gap-4 lg:flex-row lg:items-center">
           <div>
             <h3 className="font-headline-md text-2xl font-bold text-on-surface">Revenue Analytics</h3>
@@ -620,7 +700,9 @@ const AdminDashboard = ({ navigateTo }) => {
             () => downloadCsv('earning-analytics', [['Label', 'Revenue'], ...revenueData.map((item) => [item.label, item.value])])
           )}
         </div>
-        {revenueDateRange.error ? (
+        {loading ? (
+          <Skeleton className="h-72 w-full" />
+        ) : revenueDateRange.error ? (
           <div className="rounded-lg bg-error-container p-4 text-sm font-bold text-on-error-container">{revenueDateRange.error}</div>
         ) : (
           renderLineChart(revenueData)
@@ -629,50 +711,8 @@ const AdminDashboard = ({ navigateTo }) => {
     </section>
   );
 
-  const renderProfileSettings = () => (
-    <section className="space-y-8">
-      <form onSubmit={handleProfileSave} className="rounded-xl border border-outline-variant/10 bg-surface-container p-8 natural-shadow">
-        <h3 className="mb-2 font-headline-md text-2xl font-bold text-on-surface">Admin Profile</h3>
-        <p className="mb-6 text-sm text-on-surface-variant">Edit your image, name, email, and password.</p>
-        {profileStatus && <div className="mb-6 rounded-lg bg-secondary-container p-3 text-sm font-bold text-on-secondary-container">{profileStatus}</div>}
-        <div className="mb-8 flex items-center gap-5">
-          <img className="h-20 w-20 rounded-full object-cover ring-4 ring-surface-variant" src={profileForm.avatar || 'https://i.pravatar.cc/150?u=admin'} alt="Admin" />
-          <div className="flex-1">
-            <label className="mb-2 block text-xs font-bold uppercase text-on-surface-variant">Profile Image URL</label>
-            <input value={profileForm.avatar} onChange={(event) => setProfileForm({ ...profileForm, avatar: event.target.value })} className="w-full rounded-lg border border-outline-variant/30 bg-surface p-3" placeholder="https://..." />
-          </div>
-        </div>
-        <div className="grid grid-cols-1 gap-5 md:grid-cols-2">
-          <input value={profileForm.name} onChange={(event) => setProfileForm({ ...profileForm, name: event.target.value })} className="rounded-lg border border-outline-variant/30 bg-surface p-3" placeholder="Full name" required />
-          <input type="email" value={profileForm.email} onChange={(event) => setProfileForm({ ...profileForm, email: event.target.value })} className="rounded-lg border border-outline-variant/30 bg-surface p-3" placeholder="Email" required />
-          <input type="password" value={profileForm.password} onChange={(event) => setProfileForm({ ...profileForm, password: event.target.value })} className="rounded-lg border border-outline-variant/30 bg-surface p-3" placeholder="Current password" />
-          <input type="password" value={profileForm.newPassword} onChange={(event) => setProfileForm({ ...profileForm, newPassword: event.target.value })} className="rounded-lg border border-outline-variant/30 bg-surface p-3" placeholder="New password" />
-          <input type="password" value={profileForm.confirmPassword} onChange={(event) => setProfileForm({ ...profileForm, confirmPassword: event.target.value })} className="rounded-lg border border-outline-variant/30 bg-surface p-3 md:col-span-2" placeholder="Confirm new password" />
-        </div>
-        <button className="mt-6 inline-flex items-center gap-2 rounded-lg bg-primary px-6 py-3 text-sm font-bold text-on-primary" type="submit">
-          <span className="material-symbols-outlined text-[18px]">save</span>
-          Save Profile
-        </button>
-      </form>
-
-      <div className="rounded-xl border border-outline-variant/10 bg-surface-container p-8 natural-shadow">
-        <h3 className="mb-2 font-headline-md text-2xl font-bold text-on-surface">Manage Testimonials</h3>
-        <p className="mb-6 text-sm text-on-surface-variant">Add success stories to appear on the landing page.</p>
-        {testimonialSuccess && <div className="mb-6 rounded-lg bg-primary-container p-3 text-sm font-bold text-on-primary-container">{testimonialSuccess}</div>}
-        <form onSubmit={handleTestimonialSubmit} className="grid grid-cols-1 gap-4 md:grid-cols-2">
-          <input value={testimonialForm.name} onChange={(event) => setTestimonialForm({ ...testimonialForm, name: event.target.value })} className="rounded-lg border border-outline-variant/30 bg-surface p-3" placeholder="Name" required />
-          <input value={testimonialForm.avatar} onChange={(event) => setTestimonialForm({ ...testimonialForm, avatar: event.target.value })} className="rounded-lg border border-outline-variant/30 bg-surface p-3" placeholder="Avatar URL" />
-          <input value={testimonialForm.role} onChange={(event) => setTestimonialForm({ ...testimonialForm, role: event.target.value })} className="rounded-lg border border-outline-variant/30 bg-surface p-3" placeholder="Role" required />
-          <input value={testimonialForm.company} onChange={(event) => setTestimonialForm({ ...testimonialForm, company: event.target.value })} className="rounded-lg border border-outline-variant/30 bg-surface p-3" placeholder="Company" required />
-          <textarea value={testimonialForm.quote} onChange={(event) => setTestimonialForm({ ...testimonialForm, quote: event.target.value })} className="h-24 rounded-lg border border-outline-variant/30 bg-surface p-3 md:col-span-2" placeholder="Quote" required />
-          <button className="rounded-lg bg-primary px-6 py-3 text-sm font-bold text-on-primary md:w-fit" type="submit">Publish Testimonial</button>
-        </form>
-      </div>
-    </section>
-  );
-
   const renderContentManager = () => (
-    <section className="rounded-xl border border-outline-variant/10 bg-surface-container p-8 natural-shadow">
+    <section className="rounded-2xl border border-outline-variant/15 bg-surface-container-lowest p-6">
       <div className="mb-6 flex flex-col justify-between gap-3 md:flex-row md:items-center">
         <div>
           <h3 className="font-headline-md text-2xl font-bold text-on-surface">Published Content</h3>
@@ -707,8 +747,7 @@ const AdminDashboard = ({ navigateTo }) => {
       case 'mentees': return renderMemberList('mentee');
       case 'applications': return renderApplications();
       case 'earnings': return renderEarnings();
-      case 'settings': return <ProfileSettings compact onSaved={refreshData} />;
-      case 'content': return renderContentManager();
+      case 'settings': return <ProfileSettings compact onSaved={refreshData} user={user} onAccountClosed={() => { dbLogout(); tokenManager.clearTokens(); navigateTo('home'); }} />;
       default: return renderDashboard();
     }
   };
@@ -717,33 +756,17 @@ const AdminDashboard = ({ navigateTo }) => {
     <div className="min-h-screen bg-surface font-body-md">
       {renderSidebar()}
 
-      {mobileMenuOpen && (
-        <div className="fixed inset-0 z-50 lg:hidden">
-          <button
-            className="absolute inset-0 bg-black/40"
-            onClick={() => setMobileMenuOpen(false)}
-            aria-label="Close dashboard menu"
-          />
-          <div className="relative h-full w-64">
-            {renderSidebar({ mobile: true })}
-          </div>
-        </div>
-      )}
-
       <main className="min-h-screen lg:pl-64 w-full bg-surface">
         <div className="mx-auto w-full max-w-[1440px] p-4 sm:p-6 lg:p-8 pb-28">
         <header className="relative mb-6 flex items-center justify-between gap-4">
           <div className="flex items-center gap-3">
-            <button
-              onClick={() => setMobileMenuOpen(true)}
-              className="flex h-11 w-11 items-center justify-center rounded-full bg-surface-container text-on-surface lg:hidden"
-              aria-label="Open dashboard menu"
-            >
-              <span className="material-symbols-outlined">menu</span>
-            </button>
             <div>
-              <h2 className="font-headline-lg text-2xl sm:text-4xl font-bold capitalize text-on-surface">{activeView.replace('-', ' ')}</h2>
-              <p className="mt-0.5 text-sm sm:text-base text-on-surface-variant">Manage platform operations, members, and metrics.</p>
+              {activeView !== 'settings' && (
+                <>
+                  <h2 className="font-headline-lg text-2xl sm:text-4xl font-bold capitalize text-on-surface">{activeView.replace('-', ' ')}</h2>
+                  <p className="mt-0.5 text-sm sm:text-base text-on-surface-variant">Manage platform operations, members, and metrics.</p>
+                </>
+              )}
             </div>
           </div>
           <div className="flex items-center gap-4">
@@ -759,7 +782,9 @@ const AdminDashboard = ({ navigateTo }) => {
                     <button className="text-xs font-bold text-secondary" onClick={() => { notifications.forEach((item) => markNotificationRead(item.id)); refreshData(); }}>Mark all read</button>
                   </div>
                   <div className="max-h-80 overflow-y-auto">
-                    {notifications.map((item) => (
+                    {notifications.length === 0 ? (
+                      <p className="p-4 text-center text-sm text-on-surface-variant">No notifications.</p>
+                    ) : notifications.map((item) => (
                       <div key={item.id} className={`border-b border-outline-variant/5 p-4 ${!item.read ? 'bg-primary/5' : ''}`}>
                         <div className="mb-1 flex justify-between gap-3">
                           <span className="text-sm font-bold text-on-surface">{item.title}</span>
@@ -776,8 +801,19 @@ const AdminDashboard = ({ navigateTo }) => {
               )}
             </div>
             <button onClick={() => setActiveView('settings')} className="flex items-center gap-3 rounded-full bg-surface-container px-4 py-2 natural-shadow transition-colors hover:bg-surface-container-high">
-              <img className="h-8 w-8 rounded-full object-cover" src={user?.avatar || 'https://i.pravatar.cc/150?u=admin'} alt="Admin" />
-              <span className="text-sm font-semibold text-on-surface">{user?.name}</span>
+              <div className="w-8 h-8 rounded-full overflow-hidden bg-surface-variant border border-outline-variant/30">
+                {user?.avatar || user?.profilePic ? (
+                  <img className="w-full h-full object-cover" src={user.avatar || user.profilePic} alt={user?.name} />
+                ) : (
+                  <span className="flex h-full w-full items-center justify-center text-xs font-bold text-on-surface-variant">
+                    {(user?.name || 'U').split(' ').map((w) => w[0]).join('').slice(0, 2).toUpperCase()}
+                  </span>
+                )}
+              </div>
+              <span className="hidden sm:block">
+                <span className="block text-sm font-semibold leading-none text-on-surface">{user?.name || 'Admin'}</span>
+                <span className="mt-1 block text-[11px] text-on-surface-variant">Administrator</span>
+              </span>
             </button>
           </div>
         </header>
@@ -823,8 +859,50 @@ const AdminDashboard = ({ navigateTo }) => {
                   <div className="font-semibold text-on-surface">{key === 'createdAt' ? new Date(selectedMember[key]).toLocaleString() : selectedMember[key] || 'Not set'}</div>
                 </div>
               ))}
+              {selectedMember.role === 'mentor' && (
+                <div className="rounded-lg bg-surface-container-low p-3 col-span-1 md:col-span-2">
+                  <div className="text-xs font-bold uppercase text-on-surface-variant">Experience Level (Auto-calculated)</div>
+                  <div className="mt-1">
+                    {(() => {
+                      const ml = getMentorLevel(selectedMember);
+                      const mlStyle = getMentorLevelStyle(ml.level);
+                      return (
+                        <div className={`mentor-level-badge mentor-level-${ml.level} ${mlStyle.wrapper}`}>
+                          {mlStyle.icon && <span className="material-symbols-outlined text-[10px]">{mlStyle.icon}</span>}
+                          {ml.label}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                </div>
+              )}
             </div>
+            {selectedMember.rejectionReason && (
+              <div className="mt-3 rounded-lg bg-error-container/20 p-3">
+                <div className="text-xs font-bold uppercase text-error">Rejection Reason</div>
+                <div className="text-sm font-semibold text-on-surface">{selectedMember.rejectionReason}</div>
+              </div>
+            )}
             <p className="mt-4 rounded-lg bg-surface-container-low p-3 text-sm text-on-surface-variant">{selectedMember.bio || 'No bio has been added yet.'}</p>
+            {selectedMember.cv && selectedMember.cv.url && (
+              <div className="mt-4 rounded-lg bg-surface-container-low p-4">
+                <div className="text-xs font-bold uppercase text-on-surface-variant mb-2">CV / Resume</div>
+                <div className="flex items-center gap-3">
+                  <span className="material-symbols-outlined text-primary">description</span>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-semibold text-on-surface truncate">{selectedMember.cv.filename || 'Resume'}</p>
+                  </div>
+                  <a
+                    href={selectedMember.cv.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="rounded-lg bg-primary px-4 py-2 text-sm font-bold text-on-primary hover:brightness-110 transition-all"
+                  >
+                    Read CV
+                  </a>
+                </div>
+              </div>
+            )}
             <div className="mt-6 flex justify-end gap-3">
               <button onClick={() => setSelectedMember(null)} className="rounded-lg bg-surface px-4 py-2 font-bold text-on-surface-variant">Close</button>
               <button onClick={() => handleDeleteMember(selectedMember.id)} className="rounded-lg bg-error px-4 py-2 font-bold text-on-error">Delete User</button>
@@ -845,17 +923,17 @@ const AdminDashboard = ({ navigateTo }) => {
                 <option value="mentee">Mentee</option>
                 <option value="mentor">Mentor</option>
               </select>
-              <input value={memberForm.name} onChange={(event) => setMemberForm({ ...memberForm, name: event.target.value })} className="rounded-lg border border-outline-variant/30 bg-surface p-3" placeholder="Full name" required />
-              <input type="email" value={memberForm.email} onChange={(event) => setMemberForm({ ...memberForm, email: event.target.value })} className="rounded-lg border border-outline-variant/30 bg-surface p-3" placeholder="Email" required />
-              <input type="password" value={memberForm.password} onChange={(event) => setMemberForm({ ...memberForm, password: event.target.value })} className="rounded-lg border border-outline-variant/30 bg-surface p-3" placeholder="Password" required />
-              <input value={memberForm.title} onChange={(event) => setMemberForm({ ...memberForm, title: event.target.value })} className="rounded-lg border border-outline-variant/30 bg-surface p-3" placeholder={memberForm.role === 'mentor' ? 'Job title' : 'Current status'} />
-              <input value={memberForm.avatar} onChange={(event) => setMemberForm({ ...memberForm, avatar: event.target.value })} className="rounded-lg border border-outline-variant/30 bg-surface p-3" placeholder="Image URL" />
-              <input value={memberForm.skills} onChange={(event) => setMemberForm({ ...memberForm, skills: event.target.value })} className="rounded-lg border border-outline-variant/30 bg-surface p-3 md:col-span-2" placeholder="Skills, comma separated" />
+              <Input label="Full name" value={memberForm.name} onChange={(event) => setMemberForm({ ...memberForm, name: event.target.value })} placeholder="Enter full name" required autoComplete="name" />
+              <Input label="Email" type="email" inputMode="email" value={memberForm.email} onChange={(event) => setMemberForm({ ...memberForm, email: event.target.value })} placeholder="Enter email address" required autoComplete="email" />
+              <Input label="Password" type="password" value={memberForm.password} onChange={(event) => setMemberForm({ ...memberForm, password: event.target.value })} placeholder="Enter password" required autoComplete="new-password" />
+              <Input label={memberForm.role === 'mentor' ? 'Job title' : 'Current status'} value={memberForm.title} onChange={(event) => setMemberForm({ ...memberForm, title: event.target.value })} placeholder={memberForm.role === 'mentor' ? 'e.g. Senior Engineer' : 'e.g. Looking for mentor'} autoComplete="organization-title" />
+              <Input label="Avatar URL" value={memberForm.avatar} onChange={(event) => setMemberForm({ ...memberForm, avatar: event.target.value })} placeholder="https://example.com/avatar.jpg" autoComplete="url" />
+              <Input label="Skills" value={memberForm.skills} onChange={(event) => setMemberForm({ ...memberForm, skills: event.target.value })} span="md:col-span-2" placeholder="React, Node.js, TypeScript" autoComplete="off" />
               {memberForm.role === 'mentor' && (
                 <>
-                  <input value={memberForm.company} onChange={(event) => setMemberForm({ ...memberForm, company: event.target.value })} className="rounded-lg border border-outline-variant/30 bg-surface p-3" placeholder="Company" />
-                  <input value={memberForm.industry} onChange={(event) => setMemberForm({ ...memberForm, industry: event.target.value })} className="rounded-lg border border-outline-variant/30 bg-surface p-3" placeholder="Industry" />
-                  <input type="number" value={memberForm.hourlyRate} onChange={(event) => setMemberForm({ ...memberForm, hourlyRate: event.target.value })} className="rounded-lg border border-outline-variant/30 bg-surface p-3" placeholder="Hourly rate" />
+                  <Input label="Company" value={memberForm.company} onChange={(event) => setMemberForm({ ...memberForm, company: event.target.value })} placeholder="e.g. Acme Corp" autoComplete="organization" />
+                  <Input label="Industry" value={memberForm.industry} onChange={(event) => setMemberForm({ ...memberForm, industry: event.target.value })} placeholder="e.g. Technology" autoComplete="off" />
+                  <Input label="Hourly rate" type="text" inputMode="decimal" value={memberForm.hourlyRate} onChange={(event) => setMemberForm({ ...memberForm, hourlyRate: event.target.value })} placeholder="e.g. 100" autoComplete="off" />
                 </>
               )}
             </div>
@@ -886,4 +964,5 @@ const AdminDashboard = ({ navigateTo }) => {
   );
 };
 
+export { AdminDashboard };
 export default AdminDashboard;
