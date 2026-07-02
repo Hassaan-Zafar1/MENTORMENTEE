@@ -455,8 +455,6 @@ export async function resetPassword(req, res, next) {
 
 export async function getMe(req, res, next) {
   try {
-    console.log("📦 req.user country:", req.user.country);
-    console.log("📦 req.user city:", req.user.city);
     res.status(200).json({
       success: true,
       user: buildUserResponse(req.user), // ✅ Full user object
